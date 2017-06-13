@@ -27,25 +27,23 @@ import org.apache.ignite.cache.CacheAtomicityMode;
 import org.apache.ignite.configuration.CacheConfiguration;
 import org.apache.ignite.transactions.Transaction;
 import org.apache.ignite.transactions.TransactionDeadlockException;
-import org.apache.ignite.transactions.TransactionTimeoutException;
+import org.apache.ignite.transactions.TransactionOptimisticException;
 
+import static org.apache.ignite.transactions.TransactionConcurrency.OPTIMISTIC;
 import static org.apache.ignite.transactions.TransactionConcurrency.PESSIMISTIC;
 import static org.apache.ignite.transactions.TransactionIsolation.REPEATABLE_READ;
+import static org.apache.ignite.transactions.TransactionIsolation.SERIALIZABLE;
 
 /**
- * Demonstrates how to leverage from the deadlock detection mechanism in Ignite. The feature simplifies debugging of
- * distributed deadlocks that may be caused by your code. To enable the feature you should start an Ignite transaction
- * with a non-zero timeout and catch TransactionDeadlockException that will contain deadlock details.
+ * Demonstrates how to use the deadlock-free transactions in Ignite that can even help to avoid deadlocks like
+ * it's shown in this example.
  */
-public class DeadlockDetectionExample {
+public class DeadlockFreeTransactionsExample {
     /** Cache name. */
-    private static final String CACHE_NAME = DeadlockDetectionExample.class.getSimpleName();
+    private static final String CACHE_NAME = DeadlockFreeTransactionsExample.class.getSimpleName();
 
     /** Total number of entries to use in the example. */
     private static int ENTRIES_COUNT = 10;
-
-    /** Required to defreeze a transaction that is in the deadlock and trigger the deadlock detection. */
-    private static int TX_TIMEOUT = 3000;
 
     /**
      * Executes example.
@@ -74,7 +72,7 @@ public class DeadlockDetectionExample {
 
                 // Make transactional deposits from multiple threads in reverse order explicitly.
                 // This will cause a distributed deadlock and as a result:
-                // - the deadlock detection mechanism can be used for the failed transaction to troubleshoot the issue.
+                // - one of the transactions will fail and it will be restarted.
                 Thread th1 = new Thread(new Runnable() {
                     @Override public void run() {
                         try {
@@ -104,6 +102,10 @@ public class DeadlockDetectionExample {
                 // Waiting for the completion.
                 th1.join();
                 th2.join();
+
+                System.out.println();
+                System.out.println(">>> Accounts after deposit: ");
+                printAccounts(cache);
             }
             finally {
                 // Distributed cache could be removed from cluster only by #destroyCache() call.
@@ -123,41 +125,39 @@ public class DeadlockDetectionExample {
         boolean reverse) throws InterruptedException {
         System.out.println(">>> Trying to deposit: " + amount);
 
-        // Starting the transaction and setting the timeout in order to defreeze the transaction if it gets into
-        // the deadlock and to trigger the deadlock detection to troubleshoot the issue.
-        try (Transaction tx = Ignition.ignite().transactions().txStart(PESSIMISTIC, REPEATABLE_READ, TX_TIMEOUT, 10)) {
-            if (reverse) {
-                // Preparing the updates in the reverse keys order.
-                for (int id = ENTRIES_COUNT; id > 0; id--) {
-                    deposit(cache, id, amount);
+        while (true) {
+            // Starting the deadlock-free transaction (OPTIMISTIC & SERIALIZABLE).
+            try (Transaction tx = Ignition.ignite().transactions().txStart(OPTIMISTIC, SERIALIZABLE)) {
+                if (reverse) {
+                    // Preparing the updates in the reverse keys order.
+                    for (int id = ENTRIES_COUNT; id > 0; id--) {
+                        deposit(cache, id, amount);
 
-                    Thread.sleep(10);
+                        Thread.sleep(10);
+                    }
                 }
-            }
-            else {
-                // Preparing the updates in the natural keys order.
-                for (int id = 1; id <= ENTRIES_COUNT; id++) {
-                    deposit(cache, id, amount);
+                else {
+                    // Preparing the updates in the natural keys order.
+                    for (int id = 1; id <= ENTRIES_COUNT; id++) {
+                        deposit(cache, id, amount);
 
-                    Thread.sleep(10);
+                        Thread.sleep(10);
+                    }
                 }
-            }
 
-            // Stop the thread deliberately to increase the chances of getting the deadlock.
-            Thread.sleep(2000);
+                // Stop the thread deliberately to increase the chances of getting the deadlock.
+                Thread.sleep(2000);
 
-            // Committing the transaction.
-            tx.commit();
-        }
-        catch (CacheException e) {
-            if (e.getCause() instanceof IgniteCheckedException &&
-                e.getCause().getCause() instanceof TransactionDeadlockException) {
-
-                System.out.println(">>> Deadlock Detected:");
-                System.out.println(e.getCause().getCause().getMessage());
-                System.out.println();
+                // Committing the transaction.
+                tx.commit();
 
                 return;
+            }
+            catch (TransactionOptimisticException e) {
+
+                System.out.println();
+                System.out.println(">>> Transaction has failed due to the locks conflict. Restarting it...");
+                System.out.println();
             }
         }
     }
